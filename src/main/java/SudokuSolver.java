@@ -1,19 +1,29 @@
 import javafx.application.Application;
-import javafx.application.Platform;
-import javafx.geometry.Insets;
-import javafx.geometry.Pos;
-import javafx.scene.Scene;
-import javafx.scene.control.Button;
-import javafx.scene.control.TextField;
-import javafx.scene.layout.GridPane;
-import javafx.scene.text.Text;
+
 import javafx.stage.Stage;
+import net.sourceforge.tess4j.ITesseract;
+import net.sourceforge.tess4j.Tesseract;
+import net.sourceforge.tess4j.TesseractException;
+import org.opencv.core.*;
+import org.opencv.imgcodecs.Imgcodecs;
+import org.opencv.imgproc.Imgproc;
+import org.opencv.videoio.VideoCapture;
 
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
-public class SudokuSolver extends Application {
+import static org.opencv.imgproc.Imgproc.contourArea;
+import static org.opencv.imgproc.Imgproc.floodFill;
+
+
+public class SudokuSolver{
 
     static int[][] board= new int[][]{
             {0,4,0,0,6,0,7,0,0},
@@ -28,52 +38,115 @@ public class SudokuSolver extends Application {
     };
     static int iterations = 0;
 
-    @Override
-    public void start(Stage stage) throws Exception {
+    public static void main(String[] args) throws IOException {
+        System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
+
+        Mat sudoku = Imgcodecs.imread("C:/Users/lampe/OneDrive - Queen's University/Intellij/IdeaProjects/sudokusolver/src/main/resources/puzzle.jpg", Imgcodecs.CV_LOAD_IMAGE_GRAYSCALE);
+
+        Mat outerBox = new Mat(sudoku.size(), CvType.CV_8UC1);
+
+        Imgproc.GaussianBlur(sudoku, sudoku, new Size(11,11), 0);
+        Imgproc.adaptiveThreshold(sudoku, outerBox, 255, Imgproc.ADAPTIVE_THRESH_MEAN_C, Imgproc.THRESH_BINARY, 5,2);
+        Core.bitwise_not(outerBox, outerBox);
+        Mat filter = new Mat(3,3, CvType.CV_8UC1);
+        filter.put(0,0,0);
+        filter.put(0,1,1);
+        filter.put(0,2,0);
+        filter.put(1,0,1);
+        filter.put(1,1,1);
+        filter.put(1,2,1);
+        filter.put(2,0,0);
+        filter.put(2,1,1);
+        filter.put(2,2,0);
+        Imgproc.dilate(outerBox, outerBox, filter);
 
 
-        printBoard(stage);
-        System.out.println("Is solvable: " + solve());
+        Rect largestBox = getLargestRect(outerBox);
+        Mat flooded = new Mat();
+        Imgproc.floodFill(outerBox, flooded, new Point(largestBox.x, largestBox.y), new Scalar(255,255,255), largestBox);
 
-        for(int i = 0; i < 9; i++){
-            for(int j = 0; j < 9; j++){
-                System.out.print(board[i][j] + " ");
-            }
-            System.out.print("\n");
+        BufferedImage img = matToBufferedImage(outerBox, null);
+        ImageIO.write(img, "jpg", new File("C:/Users/lampe/OneDrive - Queen's University/Intellij/IdeaProjects/sudokusolver/src/main/resources/flood.jpg"));
+
+        List<MatOfPoint> contours = new ArrayList<>();
+        Imgproc.findContours(outerBox, contours, new Mat(),Imgproc.RETR_TREE,  Imgproc.CHAIN_APPROX_SIMPLE, new Point(0, 0));
+        for(int i = 0; i < contours.size(); i++){
+            MatOfPoint c = contours.get(i);
+            Rect boundingRect = Imgproc.boundingRect(c);
+            if(!boundingRect.equals(largestBox))
+                floodFill(outerBox, new Mat(), new Point(boundingRect.x, boundingRect.y), new Scalar(0,0,0), Imgproc.boundingRect(c));
         }
 
-        System.out.println("iterations: " + iterations);
+        Imgproc.erode(outerBox, outerBox, filter);
 
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.schedule(() -> printBoard(stage), 1, TimeUnit.SECONDS);
+        img = matToBufferedImage(outerBox, null);
+        ImageIO.write(img, "jpg", new File("C:/Users/lampe/OneDrive - Queen's University/Intellij/IdeaProjects/sudokusolver/src/main/resources/solved.jpg"));
+
     }
 
-    void printBoard(Stage stage){
-
-        //Creating a Grid Pane
-        GridPane gridPane = new GridPane();
-        gridPane.setMinSize(200, 200);
-        gridPane.setPadding(new Insets(10, 10, 10, 10));
-        gridPane.setVgap(5);
-        gridPane.setHgap(5);
-        gridPane.setAlignment(Pos.CENTER);
-
-        for(int i = 0; i<9; i++){
-            for(int j=0; j < 9; j++){
-                //creating label email
-                Text text = new Text(board[j][i] + "");
-                gridPane.add(text, i, j);
-            }
+    private static Rect getLargestRect(Mat img) {
+        List<MatOfPoint> contours = new ArrayList<>();
+        List<Rect> rects = new ArrayList<>();
+        List<Double> araes = new ArrayList<>();
+        Imgproc.findContours(img, contours, new Mat(),Imgproc.RETR_TREE,  Imgproc.CHAIN_APPROX_SIMPLE, new Point(0, 0));
+        for (int i = 0; i < contours.size(); i++) {
+            MatOfPoint c = contours.get(i);
+            double area = contourArea(c);
+            Rect boundingRect = Imgproc.boundingRect(c);
+            araes.add(area);
+            rects.add(boundingRect);
         }
-
-        Scene scene = new Scene(gridPane);
-        stage.setScene(scene);
-        stage.show();
+        if (araes.isEmpty() || Collections.max(araes) < 4000) {
+            return new Rect(0, 0, img.cols(), img.rows());
+        } else {
+            Double d = Collections.max(araes);
+            return rects.get(araes.indexOf(d));
+        }
     }
 
-    public static void main(String[] args) {
-        launch(args);
 
+    /**
+     * Converts/writes a Mat into a BufferedImage.
+     *
+     * @param matrix Mat of type CV_8UC3 or CV_8UC1
+     * @return BufferedImage of type TYPE_3BYTE_BGR or TYPE_BYTE_GRAY
+     */
+    public static BufferedImage matToBufferedImage(Mat matrix, BufferedImage bimg)
+    {
+        if ( matrix != null ) {
+            int cols = matrix.cols();
+            int rows = matrix.rows();
+            int elemSize = (int)matrix.elemSize();
+            byte[] data = new byte[cols * rows * elemSize];
+            int type;
+            matrix.get(0, 0, data);
+            switch (matrix.channels()) {
+                case 1:
+                    type = BufferedImage.TYPE_BYTE_GRAY;
+                    break;
+                case 3:
+                    type = BufferedImage.TYPE_3BYTE_BGR;
+                    // bgr to rgb
+                    byte b;
+                    for(int i=0; i<data.length; i=i+3) {
+                        b = data[i];
+                        data[i] = data[i+2];
+                        data[i+2] = b;
+                    }
+                    break;
+                default:
+                    return null;
+            }
+
+            // Reuse existing BufferedImage if possible
+            if (bimg == null || bimg.getWidth() != cols || bimg.getHeight() != rows || bimg.getType() != type) {
+                bimg = new BufferedImage(cols, rows, type);
+            }
+            bimg.getRaster().setDataElements(0, 0, cols, rows, data);
+        } else { // mat was null
+            bimg = null;
+        }
+        return bimg;
     }
 
     boolean solve(){
